@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 import csv
 import io
+import os
 
 from fastapi import FastAPI, Query, HTTPException, Header, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -32,7 +33,7 @@ from .services.gemini import (
 )
 from .services.matching import rank_books
 from .services.elevenlabs import text_to_speech
-from .services.google_books import search_google_books
+from .services.google_books import search_google_books, fetch_cover_url
 
 load_env()
 ensure_demo_users()
@@ -126,13 +127,70 @@ def _import_google_books(db, query: str, language: str | None, limit: int) -> Li
     return imported
 
 
+def _maybe_backfill_cover(db, book: dict) -> dict:
+    import os
+
+    if book.get("cover_url"):
+        return book
+    if os.getenv("GOOGLE_BOOKS_ENABLED", "true").lower() not in {"1", "true", "yes"}:
+        return book
+    cover_url = fetch_cover_url(
+        title=book.get("title", ""),
+        author=book.get("author", ""),
+        isbn=book.get("isbn", ""),
+    )
+    if cover_url:
+        db.books.update_one({"_id": book["_id"]}, {"$set": {"cover_url": cover_url}})
+        book["cover_url"] = cover_url
+    return book
+
+
+def _normalize_header(key: str) -> str:
+    key = key.strip().lower()
+    key = key.replace(" ", "_").replace("-", "_")
+    if key in {"book_title", "book"}:
+        return "title"
+    if key in {"authors", "writer"}:
+        return "author"
+    if key in {"desc", "summary", "synopsis"}:
+        return "description"
+    if key in {"genres", "genre", "subjects"}:
+        return "tags"
+    if key in {"subgenre", "sub_genre", "subcategory"}:
+        return "tags"
+    if key in {"min_age", "age_minimum"}:
+        return "age_min"
+    if key in {"max_age", "age_maximum"}:
+        return "age_max"
+    if key in {"readinglevel", "level"}:
+        return "reading_level"
+    if key in {"lang"}:
+        return "language"
+    if key in {"book_format", "binding"}:
+        return "format"
+    if key in {"cover", "image", "thumbnail"}:
+        return "cover_url"
+    if key in {"isbn13", "isbn_13"}:
+        return "isbn"
+    if key in {"qty", "quantity", "stock"}:
+        return "qty_available"
+    if key in {"location", "site"}:
+        return "location_id"
+    return key
+
+
 def _parse_csv_inventory(text: str) -> List[dict]:
     reader = csv.DictReader(io.StringIO(text))
     rows = []
     for row in reader:
         if not row:
             continue
-        normalized = {k.strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
+        normalized = {}
+        for k, v in row.items():
+            if k is None:
+                continue
+            nk = _normalize_header(k)
+            normalized[nk] = v.strip() if isinstance(v, str) else v
         rows.append(normalized)
     return rows
 
@@ -173,6 +231,23 @@ def keys_status():
         "elevenlabs_configured": bool(os.getenv("ELEVENLABS_API_KEY")),
         "elevenlabs_voice_configured": bool(os.getenv("ELEVENLABS_VOICE_ID") or os.getenv("ELEVENLABS_VOICE_NAME")),
         "mongodb_configured": bool(os.getenv("MONGODB_URI")),
+    }
+
+
+@app.get("/api/admin/db-info", dependencies=[Depends(_require_staff)])
+def db_info():
+    db = get_db()
+    try:
+        books = db.books.count_documents({})
+        inventory = db.inventory.count_documents({})
+        requests = db.requests.count_documents({})
+    except Exception:
+        books = inventory = requests = 0
+    return {
+        "database": db.name,
+        "books": books,
+        "inventory": inventory,
+        "requests": requests,
     }
 
 
@@ -288,6 +363,15 @@ def gemini_test(model: Optional[str] = None):
         return {"ok": False, "error": str(exc)}
 
 
+@app.get("/api/gemini-test-public")
+def gemini_test_public(model: Optional[str] = None):
+    try:
+        result = test_gemini(model=model)
+        return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @app.get("/api/admin/gemini-models", dependencies=[Depends(_require_staff)])
 def gemini_models():
     try:
@@ -356,11 +440,13 @@ def import_inventory(payload: dict):
     inserted = 0
     updated = 0
     inventory_upserts = 0
+    skipped = 0
 
     for row in rows:
         title = row.get("title") or ""
         author = row.get("author") or ""
         if not title:
+            skipped += 1
             continue
         isbn = row.get("isbn") or ""
         tags_raw = row.get("tags") or ""
@@ -373,11 +459,27 @@ def import_inventory(payload: dict):
             age_max = int(row.get("age_max")) if row.get("age_max") else None
         except Exception:
             age_max = None
-        reading_level = row.get("reading_level") or "unknown"
+        reading_level = row.get("reading_level") or "middle"
         language = row.get("language") or "English"
         fmt = row.get("format") or "chapter"
         cover_url = row.get("cover_url") or ""
         description = row.get("description") or ""
+        publisher = row.get("publisher") or ""
+
+        if not tags and row.get("genre"):
+            tags = [str(row.get("genre")).strip().lower()]
+        if row.get("subgenre"):
+            sub = str(row.get("subgenre")).strip().lower()
+            if sub and sub not in tags:
+                tags.append(sub)
+        if publisher and not description:
+            description = f"Publisher: {publisher}"
+        if age_min is None:
+            age_min = 8
+        if age_max is None:
+            age_max = max(age_min + 4, 12)
+        if not cover_url and os.getenv("GOOGLE_BOOKS_ENABLED", "true").lower() in {"1", "true", "yes"}:
+            cover_url = fetch_cover_url(title=title, author=author, isbn=isbn)
 
         book_doc = {
             "title": title,
@@ -427,7 +529,53 @@ def import_inventory(payload: dict):
         "inserted_books": inserted,
         "updated_books": updated,
         "inventory_upserts": inventory_upserts,
+        "skipped": skipped,
     }
+
+
+@app.post("/api/admin/books/refresh-covers", dependencies=[Depends(_require_staff)])
+def refresh_covers(payload: dict):
+    if os.getenv("GOOGLE_BOOKS_ENABLED", "true").lower() not in {"1", "true", "yes"}:
+        raise HTTPException(status_code=400, detail="Google Books is disabled")
+    try:
+        limit = int(payload.get("limit") or 25)
+    except Exception:
+        limit = 25
+    force = bool(payload.get("force"))
+    refresh_all = bool(payload.get("all"))
+
+    db = get_db()
+    base_query = {} if force else {"$or": [{"cover_url": {"$exists": False}}, {"cover_url": ""}]}
+    batch_size = max(min(limit, 200), 1)
+    updated = 0
+    skipped = 0
+    checked = 0
+    last_id = None
+
+    while True:
+        query = dict(base_query)
+        if refresh_all and last_id is not None:
+            query["_id"] = {"$gt": last_id}
+        books = list(db.books.find(query).sort("_id", 1).limit(batch_size))
+        if not books:
+            break
+        for book in books:
+            last_id = book["_id"]
+            checked += 1
+            cover = fetch_cover_url(
+                title=book.get("title", ""),
+                author=book.get("author", ""),
+                isbn=book.get("isbn", ""),
+            )
+            if cover:
+                db.books.update_one({"_id": book["_id"]}, {"$set": {"cover_url": cover}})
+                updated += 1
+            else:
+                skipped += 1
+        if not refresh_all:
+            break
+
+    return {"ok": True, "checked": checked, "updated": updated, "skipped": skipped}
 
 
 @app.post("/api/admin/inventory/update", dependencies=[Depends(_require_staff)])
@@ -590,7 +738,7 @@ def demo_seed():
 @app.post("/api/parse")
 def parse(req: ParseRequest):
     meta = {"age": req.age, "language": req.language, "format": req.format}
-    parsed_info = parse_preferences_with_meta(req.text, meta, req.model)
+    parsed_info = parse_preferences_with_meta(req.text, meta, req.model, use_gemini=bool(req.use_gemini))
     return parsed_info
 
 
@@ -598,7 +746,7 @@ def parse(req: ParseRequest):
 def chat(req: ParseRequest, request: Request):
     user = _get_current_user(request.headers.get("authorization"))
     meta = {"age": req.age, "language": req.language, "format": req.format}
-    parsed_info = parse_preferences_with_meta(req.text, meta, req.model)
+    parsed_info = parse_preferences_with_meta(req.text, meta, req.model, use_gemini=bool(req.use_gemini))
     parsed = parsed_info["parsed"]
 
     db = get_db()
@@ -630,6 +778,7 @@ def chat(req: ParseRequest, request: Request):
 
     ranked = rank_books(filtered, prefs, query=req.text or "")
     top = ranked[:5]
+    top = [_maybe_backfill_cover(db, b) for b in top]
     response = explain_matches(req.text, parsed, [_serialize(b) for b in top], model=req.model)
     if user:
         db = get_db()
@@ -641,6 +790,7 @@ def chat(req: ParseRequest, request: Request):
     return {
         "parsed": parsed,
         "gemini_used": parsed_info.get("gemini_used", False),
+        "gemini_error": parsed_info.get("gemini_error"),
         "matches": [
             {**_serialize(b), "score": round(b["score"], 2)}
             for b in top
@@ -670,6 +820,8 @@ def book_summary(payload: dict):
     book = db.books.find_one({"_id": ObjectId(book_id)})
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
+    if payload.get("use_gemini") is False:
+        return summarize_book(_serialize(book), model=None)
     return summarize_book(_serialize(book), model=payload.get("model"))
 
 
@@ -679,6 +831,8 @@ def gemini_concierge(payload: dict):
     history = payload.get("history", [])
     if not message:
         raise HTTPException(status_code=400, detail="message required")
+    if payload.get("use_gemini") is False:
+        return concierge_reply(message, history, model=None)
     return concierge_reply(message, history, model=payload.get("model"))
 
 
@@ -733,6 +887,7 @@ def search_books(
 
     ranked = rank_books(filtered, prefs, query=q or "")
     top = ranked[:5]
+    top = [_maybe_backfill_cover(db, b) for b in top]
     return [
         {
             **_serialize(b),

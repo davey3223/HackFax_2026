@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { concierge, createRequest, fetchBookSummary, chatBooks, textToSpeech, getMyRecommendations } from "../api";
 import type { Book, ParsedPreferences } from "../types";
 
@@ -14,6 +14,7 @@ export default function KidPage() {
   const [results, setResults] = useState<Book[]>([]);
   const [parsed, setParsed] = useState<ParsedPreferences | null>(null);
   const [geminiUsed, setGeminiUsed] = useState<boolean | null>(null);
+  const [geminiNotice, setGeminiNotice] = useState<string | null>(null);
   const [chatResponse, setChatResponse] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +30,7 @@ export default function KidPage() {
   const [requesterNotes, setRequesterNotes] = useState("");
   const [myRecs, setMyRecs] = useState<Book[]>([]);
   const [recError, setRecError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   async function loadMyRecs() {
     setRecError(null);
@@ -45,6 +47,14 @@ export default function KidPage() {
     loadMyRecs();
   }, []);
 
+  useEffect(() => {
+    if (audioUrl && audioRef.current) {
+      audioRef.current
+        .play()
+        .catch(() => setError("Audio is ready. Tap play if it doesn’t start automatically."));
+    }
+  }, [audioUrl]);
+
   async function handleSearch() {
     setLoading(true);
     setError(null);
@@ -58,6 +68,15 @@ export default function KidPage() {
       });
       setParsed(data.parsed);
       setGeminiUsed(data.gemini_used ?? null);
+      if (!data.gemini_used && data.gemini_error) {
+        if (data.gemini_error.includes("429") || data.gemini_error.includes("Too Many Requests")) {
+          setGeminiNotice("Gemini is busy right now. We used a quick fallback so you still get results.");
+        } else {
+          setGeminiNotice("Gemini is offline. We used a quick fallback so you still get results.");
+        }
+      } else {
+        setGeminiNotice(null);
+      }
       setChatResponse(data.response || null);
       setResults(data.matches || []);
       setSelectedIds((data.matches || []).map((book) => book.id));
@@ -76,8 +95,6 @@ export default function KidPage() {
       const url = URL.createObjectURL(blob);
       if (audioUrl) URL.revokeObjectURL(audioUrl);
       setAudioUrl(url);
-      const audio = new Audio(url);
-      audio.play();
     } catch (err) {
       setError(err instanceof Error ? err.message : "TTS failed");
     } finally {
@@ -275,6 +292,12 @@ export default function KidPage() {
       </div>
       {error ? <div className="error">{error}</div> : null}
       {message ? <div className="success">{message}</div> : null}
+      {audioUrl ? (
+        <div className="panel-sub">
+          <h3>Audio Player</h3>
+          <audio ref={audioRef} controls src={audioUrl} />
+        </div>
+      ) : null}
 
       {parsed ? (
         <div className="panel-sub">
@@ -284,6 +307,7 @@ export default function KidPage() {
               <span className={geminiUsed ? "badge ok" : "badge warn"}>
                 {geminiUsed ? "Gemini online" : "Gemini offline (fallback)"}
               </span>
+              {geminiNotice ? <span className="muted">{geminiNotice}</span> : null}
             </div>
           ) : null}
           <div className="chips">
@@ -357,7 +381,7 @@ export default function KidPage() {
               {book.cover_url ? (
                 <img src={book.cover_url} alt={`${book.title} cover`} />
               ) : (
-                <span>{coverLabel(book)}</span>
+                <img src="/cover-placeholder.svg" alt="Book cover placeholder" />
               )}
             </div>
             <div>
@@ -406,7 +430,7 @@ export default function KidPage() {
                   {book.cover_url ? (
                     <img src={book.cover_url} alt={`${book.title} cover`} />
                   ) : (
-                    <span>{coverLabel(book)}</span>
+                    <img src="/cover-placeholder.svg" alt="Book cover placeholder" />
                   )}
                 </div>
                 <div>

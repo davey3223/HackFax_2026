@@ -29,12 +29,11 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [highContrast, setHighContrast] = useState(false);
   const [largeText, setLargeText] = useState(false);
+  const [useGemini, setUseGemini] = useState(true);
   const touchStartX = useRef<number | null>(null);
 
   useEffect(() => {
-    me()
-      .then(setUser)
-      .catch(() => setUser(null));
+    me().then((result) => setUser(result));
   }, []);
 
   useEffect(() => {
@@ -58,9 +57,11 @@ export default function App() {
     const storedTheme = localStorage.getItem("bookmatch_theme") as "light" | "dark" | null;
     const storedContrast = localStorage.getItem("bookmatch_contrast");
     const storedText = localStorage.getItem("bookmatch_text");
+    const storedGemini = localStorage.getItem("bookmatch_use_gemini");
     if (storedTheme) setTheme(storedTheme);
     if (storedContrast) setHighContrast(storedContrast === "high");
     if (storedText) setLargeText(storedText === "large");
+    if (storedGemini) setUseGemini(storedGemini === "true");
   }, []);
 
   useEffect(() => {
@@ -71,7 +72,8 @@ export default function App() {
     localStorage.setItem("bookmatch_theme", theme);
     localStorage.setItem("bookmatch_contrast", highContrast ? "high" : "normal");
     localStorage.setItem("bookmatch_text", largeText ? "large" : "normal");
-  }, [theme, highContrast, largeText]);
+    localStorage.setItem("bookmatch_use_gemini", useGemini ? "true" : "false");
+  }, [theme, highContrast, largeText, useGemini]);
 
   useEffect(() => {
     if ((tab === "staff" || tab === "volunteer") && (!user || (user.role !== "staff" && user.role !== "volunteer"))) {
@@ -166,6 +168,9 @@ export default function App() {
           </button>
           <button className="secondary" onClick={() => setLargeText((prev) => !prev)}>
             {largeText ? "Standard text" : "Large text"}
+          </button>
+          <button className="secondary" onClick={() => setUseGemini((prev) => !prev)}>
+            {useGemini ? "Gemini: On" : "Gemini: Off"}
           </button>
           {user ? (
             <button className="secondary" onClick={handleLogout}>

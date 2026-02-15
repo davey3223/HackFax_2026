@@ -11,6 +11,7 @@ import type {
   GeminiModelsResponse,
   InventoryImportResult,
   AnalyticsResponse,
+  DbInfo,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
@@ -28,6 +29,16 @@ function getAuthToken(): string {
     return localStorage.getItem("bookmatch_token") || "";
   } catch {
     return "";
+  }
+}
+
+function getUseGemini(): boolean {
+  try {
+    const raw = localStorage.getItem("bookmatch_use_gemini");
+    if (raw === null) return true;
+    return raw === "true";
+  } catch {
+    return true;
   }
 }
 
@@ -78,7 +89,7 @@ export function parsePreferences(payload: {
 }): Promise<ParsedPreferences> {
   return request("/api/parse", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, use_gemini: getUseGemini() }),
   });
 }
 
@@ -90,7 +101,11 @@ export function chatBooks(payload: {
 }): Promise<ChatResponse> {
   return request("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ ...payload, model: getGeminiModel() || undefined }),
+    body: JSON.stringify({
+      ...payload,
+      model: getGeminiModel() || undefined,
+      use_gemini: getUseGemini(),
+    }),
   });
 }
 
@@ -168,8 +183,14 @@ export function demoLogin(): Promise<{ token: string; user: { id: string; email:
   });
 }
 
-export function me(): Promise<{ id: string; email: string; name: string; role: string }> {
-  return request("/api/auth/me");
+export async function me(): Promise<{ id: string; email: string; name: string; role: string } | null> {
+  const token = getAuthToken();
+  if (!token) return null;
+  try {
+    return await request("/api/auth/me");
+  } catch {
+    return null;
+  }
 }
 
 export function magicLogin(token: string): Promise<{ token: string; user: { id: string; email: string; name: string; role: string } }> {
@@ -186,8 +207,14 @@ export function createMagicLink(): Promise<{ url: string }> {
   });
 }
 
-export function getMyRecommendations(): Promise<{ books: Book[] }> {
-  return request("/api/users/me/recommendations");
+export async function getMyRecommendations(): Promise<{ books: Book[] }> {
+  const token = getAuthToken();
+  if (!token) return { books: [] };
+  try {
+    return await request("/api/users/me/recommendations");
+  } catch {
+    return { books: [] };
+  }
 }
 
 export function seedDemoRequests(): Promise<{ ok: boolean; created: number }> {
@@ -195,6 +222,10 @@ export function seedDemoRequests(): Promise<{ ok: boolean; created: number }> {
     method: "POST",
     body: JSON.stringify({}),
   });
+}
+
+export function fetchDbInfo(): Promise<DbInfo> {
+  return request("/api/admin/db-info");
 }
 
 export function geminiTest(): Promise<{ reply: string }> {
@@ -230,6 +261,17 @@ export function importInventory(payload: {
   });
 }
 
+export function refreshBookCovers(payload: {
+  limit?: number;
+  force?: boolean;
+  all?: boolean;
+}): Promise<{ ok: boolean; checked: number; updated: number; skipped: number }> {
+  return request("/api/admin/books/refresh-covers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function updateInventory(payload: {
   book_id: string;
   location_id: string;
@@ -255,14 +297,23 @@ export function setMongoUri(mongodb_uri: string): Promise<{ ok: boolean; path?: 
 export function fetchBookSummary(bookId: string): Promise<{ summary: string }> {
   return request("/api/books/summary", {
     method: "POST",
-    body: JSON.stringify({ book_id: bookId, model: getGeminiModel() || undefined }),
+    body: JSON.stringify({
+      book_id: bookId,
+      model: getGeminiModel() || undefined,
+      use_gemini: getUseGemini(),
+    }),
   });
 }
 
 export function concierge(message: string, history: string[] = []): Promise<ConciergeReply> {
   return request("/api/gemini/concierge", {
     method: "POST",
-    body: JSON.stringify({ message, history, model: getGeminiModel() || undefined }),
+    body: JSON.stringify({
+      message,
+      history,
+      model: getGeminiModel() || undefined,
+      use_gemini: getUseGemini(),
+    }),
   });
 }
 

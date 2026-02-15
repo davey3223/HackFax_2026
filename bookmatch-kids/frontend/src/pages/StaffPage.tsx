@@ -16,6 +16,8 @@ import {
   searchAdminBooks,
   createMagicLink,
   seedDemoRequests,
+  fetchDbInfo,
+  refreshBookCovers,
 } from "../api";
 import type {
   Picklist,
@@ -25,6 +27,7 @@ import type {
   Book,
   AnalyticsResponse,
   InventoryImportResult,
+  DbInfo,
 } from "../types";
 
 const STATUS_OPTIONS = ["new", "approved", "picked", "packed", "distributed"];
@@ -55,6 +58,10 @@ export default function StaffPage() {
   const [magicUrl, setMagicUrl] = useState<string | null>(null);
   const [magicError, setMagicError] = useState<string | null>(null);
   const [seedMessage, setSeedMessage] = useState<string | null>(null);
+  const [dbInfo, setDbInfo] = useState<DbInfo | null>(null);
+  const [coverLimit, setCoverLimit] = useState("25");
+  const [coverForce, setCoverForce] = useState(false);
+  const [coverResult, setCoverResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,6 +101,9 @@ export default function StaffPage() {
     fetchKeysStatus()
       .then(setKeys)
       .catch(() => setKeys(null));
+    fetchDbInfo()
+      .then(setDbInfo)
+      .catch(() => setDbInfo(null));
     fetchAnalytics()
       .then(setAnalytics)
       .catch(() => setAnalytics(null));
@@ -124,6 +134,9 @@ export default function StaffPage() {
       fetchAnalytics()
         .then(setAnalytics)
         .catch(() => setAnalytics(null));
+      fetchDbInfo()
+        .then(setDbInfo)
+        .catch(() => setDbInfo(null));
     }, 30000);
     return () => clearInterval(timer);
   }, []);
@@ -359,6 +372,29 @@ export default function StaffPage() {
     }
   }
 
+  async function handleRefreshCovers(all = false) {
+    setCoverResult(null);
+    setError(null);
+    setLoading(true);
+    try {
+      const limit = Number(coverLimit || "25");
+      const result = await refreshBookCovers({
+        limit: Number.isFinite(limit) ? limit : 25,
+        force: coverForce,
+        all,
+      });
+      setCoverResult(
+        `Checked ${result.checked}. Updated ${result.updated}. Skipped ${result.skipped}.`
+      );
+      const info = await fetchDbInfo();
+      setDbInfo(info);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Cover refresh failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <section className="panel">
       <h2>Staff Dashboard</h2>
@@ -406,6 +442,17 @@ export default function StaffPage() {
               Test Gemini
             </button>
             {geminiTestResult ? <span className="muted">Gemini says: {geminiTestResult}</span> : null}
+          </div>
+        </div>
+      ) : null}
+      {dbInfo ? (
+        <div className="panel-sub">
+          <h3>Database</h3>
+          <div className="chips">
+            <span className="chip">DB: {dbInfo.database}</span>
+            <span className="chip">Books: {dbInfo.books}</span>
+            <span className="chip">Inventory: {dbInfo.inventory}</span>
+            <span className="chip">Requests: {dbInfo.requests}</span>
           </div>
         </div>
       ) : null}
@@ -459,6 +506,9 @@ export default function StaffPage() {
         <p className="muted">
           Columns: title, author, description, tags, age_min, age_max, reading_level, language, format, cover_url, isbn, qty_available, location_id
         </p>
+        <p className="muted">
+          Common headers like "book_title", "authors", "summary", "genre", "isbn13", or "quantity" are auto-mapped.
+        </p>
         <div className="field-row">
           <input
             type="file"
@@ -505,9 +555,42 @@ export default function StaffPage() {
         </div>
         {importResult ? (
           <div className="success">
-            Imported. New: {importResult.inserted_books}, Updated: {importResult.updated_books}, Inventory upserts: {importResult.inventory_upserts}
+            Imported. New: {importResult.inserted_books}, Updated: {importResult.updated_books}, Inventory upserts: {importResult.inventory_upserts}{importResult.skipped ? `, Skipped: ${importResult.skipped}` : ""}
           </div>
         ) : null}
+      </div>
+      <div className="panel-sub">
+        <h3>Cover Refresh (Google Books)</h3>
+        <p className="muted">
+          Backfill missing book covers using Google Books. Use “Force” to refresh every book.
+        </p>
+        <div className="field-row">
+          <label className="field">
+            <span>Limit</span>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={coverLimit}
+              onChange={(event) => setCoverLimit(event.target.value)}
+            />
+          </label>
+          <label className="field inline">
+            <input
+              type="checkbox"
+              checked={coverForce}
+              onChange={(event) => setCoverForce(event.target.checked)}
+            />
+            <span>Force refresh</span>
+          </label>
+          <button className="secondary" onClick={handleRefreshCovers} disabled={loading}>
+            Refresh covers
+          </button>
+          <button className="secondary" onClick={() => handleRefreshCovers(true)} disabled={loading}>
+            Refresh all books
+          </button>
+          {coverResult ? <span className="muted">{coverResult}</span> : null}
+        </div>
       </div>
       <div className="panel-sub">
         <h3>Volunteer QR Login</h3>

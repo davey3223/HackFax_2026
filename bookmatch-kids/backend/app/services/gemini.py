@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import time
+import hashlib
 from typing import Dict, Any
 
 import requests
@@ -8,12 +10,33 @@ import requests
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_GEMINI_VERSION = os.getenv("GEMINI_API_VERSION", "v1")
+_CACHE: dict[str, dict] = {}
+_CACHE_TTL_SECONDS = 90
 
 
 def _endpoint(model: str | None = None, version: str | None = None) -> str:
     use_model = model or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
     use_version = version or DEFAULT_GEMINI_VERSION
     return f"https://generativelanguage.googleapis.com/{use_version}/models/{use_model}:generateContent"
+
+
+def _cache_key(payload: Dict[str, Any], model: str | None, version: str) -> str:
+    raw = json.dumps({"payload": payload, "model": model, "version": version}, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _from_cache(key: str) -> Dict[str, Any] | None:
+    item = _CACHE.get(key)
+    if not item:
+        return None
+    if time.time() - item["ts"] > _CACHE_TTL_SECONDS:
+        _CACHE.pop(key, None)
+        return None
+    return item["data"]
+
+
+def _save_cache(key: str, data: Dict[str, Any]) -> None:
+    _CACHE[key] = {"ts": time.time(), "data": data}
 
 
 def _post_gemini(payload: Dict[str, Any], model: str | None = None) -> Dict[str, Any]:
@@ -28,18 +51,33 @@ def _post_gemini(payload: Dict[str, Any], model: str | None = None) -> Dict[str,
         if version in tried:
             continue
         tried.append(version)
+        cache_key = _cache_key(payload, model, version)
+        cached = _from_cache(cache_key)
+        if cached:
+            return cached
         try:
-            resp = requests.post(
-                _endpoint(model, version=version),
-                params={"key": api_key},
-                json=payload,
-                timeout=20,
-            )
+            for attempt in range(3):
+                resp = requests.post(
+                    _endpoint(model, version=version),
+                    params={"key": api_key},
+                    json=payload,
+                    timeout=20,
+                )
+                if resp.status_code == 429:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                _save_cache(cache_key, data)
+                return data
             resp.raise_for_status()
-            return resp.json()
         except requests.HTTPError as exc:
             last_err = exc
             if resp.status_code == 404:
+                if model:
+                    # Model not found: fall back to server default
+                    model = None
+                    continue
                 continue
             raise
         except Exception as exc:
@@ -200,16 +238,29 @@ def _gemini_parse(text: str, meta: Dict[str, Any], model: str | None = None) -> 
     return json.loads(text_out)
 
 
-def parse_preferences_with_meta(text: str, meta: Dict[str, Any], model: str | None = None) -> Dict[str, Any]:
+def parse_preferences_with_meta(
+    text: str,
+    meta: Dict[str, Any],
+    model: str | None = None,
+    use_gemini: bool = True,
+) -> Dict[str, Any]:
+    if not use_gemini:
+        return {
+            "parsed": _fallback_parse(text, meta),
+            "gemini_used": False,
+            "gemini_error": "disabled",
+        }
     try:
         return {
             "parsed": _gemini_parse(text, meta, model),
             "gemini_used": True,
+            "gemini_error": None,
         }
-    except Exception:
+    except Exception as exc:
         return {
             "parsed": _fallback_parse(text, meta),
             "gemini_used": False,
+            "gemini_error": str(exc),
         }
 
 

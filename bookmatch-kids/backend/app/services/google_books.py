@@ -1,10 +1,29 @@
 import os
 from typing import Any, Dict, List
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 import requests
 
 
 GOOGLE_BOOKS_ENDPOINT = "https://www.googleapis.com/books/v1/volumes"
+BOOKCOVER_API_URL = "https://bookcover.longitood.com"
+
+
+def _normalize_cover_url(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://") :]
+    try:
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query))
+        query["zoom"] = "2"
+        rebuilt = parsed._replace(query=urlencode(query))
+        return urlunparse(rebuilt)
+    except Exception:
+        if "?" in url:
+            return url + "&zoom=2"
+        return url + "?zoom=2"
 
 
 def _volume_to_book(volume: Dict[str, Any]) -> Dict[str, Any]:
@@ -25,7 +44,16 @@ def _volume_to_book(volume: Dict[str, Any]) -> Dict[str, Any]:
         format_hint = "graphic"
 
     image_links = info.get("imageLinks") or {}
-    cover_url = image_links.get("thumbnail") or image_links.get("smallThumbnail") or ""
+    cover_url = (
+        image_links.get("extraLarge")
+        or image_links.get("large")
+        or image_links.get("medium")
+        or image_links.get("small")
+        or image_links.get("thumbnail")
+        or image_links.get("smallThumbnail")
+        or ""
+    )
+    cover_url = _normalize_cover_url(cover_url)
 
     isbn = ""
     for ident in info.get("industryIdentifiers") or []:
@@ -59,6 +87,7 @@ def search_google_books(query: str, max_results: int = 5, language: str | None =
         "q": query,
         "maxResults": max_results,
         "printType": "books",
+        "fields": "items(id,volumeInfo(title,authors,description,categories,language,pageCount,imageLinks,industryIdentifiers))",
     }
     api_key = os.getenv("GOOGLE_BOOKS_API_KEY")
     if api_key:
@@ -71,3 +100,51 @@ def search_google_books(query: str, max_results: int = 5, language: str | None =
     data = resp.json()
     items = data.get("items", []) or []
     return [_volume_to_book(item) for item in items if item]
+
+
+def _bookcover_lookup(title: str, author: str | None = None, isbn: str | None = None) -> str:
+    base_url = os.getenv("BOOKCOVER_API_URL", BOOKCOVER_API_URL).strip().rstrip("/")
+    if not base_url:
+        return ""
+    try:
+        if isbn:
+            resp = requests.get(f"{base_url}/bookcover/{isbn}", timeout=20)
+        elif title and author:
+            resp = requests.get(
+                f"{base_url}/bookcover",
+                params={"book_title": title, "author_name": author},
+                timeout=20,
+            )
+        else:
+            return ""
+        if not resp.ok:
+            return ""
+        data = resp.json()
+        url = data.get("url") if isinstance(data, dict) else ""
+        return _normalize_cover_url(url or "")
+    except Exception:
+        return ""
+
+
+def fetch_cover_url(title: str, author: str | None = None, isbn: str | None = None) -> str:
+    if not title and not isbn:
+        return ""
+    parts = []
+    if isbn:
+        parts.append(f"isbn:{isbn}")
+    if title:
+        parts.append(f"intitle:{title}")
+    if author:
+        parts.append(f"inauthor:{author}")
+    query = " ".join(parts).strip()
+    try:
+        if os.getenv("BOOKCOVER_API_ENABLED", "false").lower() in {"1", "true", "yes"}:
+            url = _bookcover_lookup(title=title, author=author, isbn=isbn)
+            if url:
+                return url
+        results = search_google_books(query, max_results=1)
+    except Exception:
+        return ""
+    if not results:
+        return ""
+    return results[0].get("cover_url") or ""

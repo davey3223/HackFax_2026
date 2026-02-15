@@ -43,7 +43,6 @@ FRONTEND_BASE_URL=http://localhost:5173
 DEMO_LOGIN=true
 DEMO_STAFF_EMAIL=demo@bookmatch.local
 DEMO_STAFF_PASSWORD=demo1234
-ADMIN_PIN=
 ELEVENLABS_API_KEY=
 ELEVENLABS_VOICE_NAME=Nathaniel– Deep, Meditative and Mellow
 ELEVENLABS_VOICE_ID=
@@ -55,6 +54,7 @@ Gemini is optional. If `GEMINI_API_KEY` is missing, the backend uses a determini
 Google Books is optional. If `GOOGLE_BOOKS_ENABLED=true`, the API will pull live books when MongoDB has fewer than 5 matches and store them in MongoDB for reuse.
 Authentication is enabled. Staff/Volunteer accounts require `STAFF_SIGNUP_CODE` to register.
 Demo login is available when `DEMO_LOGIN=true`.
+Magic volunteer links are enabled for staff to generate QR logins.
 
 ### Inventory CSV format
 You can paste CSV into Staff View → **Inventory Upload**. Recommended headers:
@@ -108,6 +108,17 @@ npm run dev
 
 Open `http://localhost:5173`.
 
+## Login & Roles
+- **Parent/Kid**: can request books and see their latest recommendations.
+- **Volunteer**: sees picklists and quick task buttons.
+- **Staff**: full dashboard, inventory tools, analytics, and QR magic links.
+
+Demo login:
+1. Click **Login**
+2. Click **Demo staff login**
+
+To allow staff/volunteer registration, set `STAFF_SIGNUP_CODE` and share it with your team.
+
 ## Demo Script
 Kid flow:
 1. Open the Kid view.
@@ -118,11 +129,21 @@ Staff flow:
 1. Switch to Staff view.
 2. Select the new request and change status (approved → picked → packed → distributed).
 3. Click **View picklist** to see the volunteer picklist.
+4. (Optional) Click **Seed demo requests** if you want a full queue quickly.
 
 Volunteer flow:
 1. Switch to Volunteer view.
 2. Select an approved request.
 3. Click **Load picklist**, then **Export CSV** or **Print**.
+
+## Accessibility & UI
+- Dark mode, high contrast, and large text toggles
+- Mobile swipe navigation and bottom nav (Kid view)
+- Read-to-me TTS using ElevenLabs
+
+## Background Image
+Place your image at:
+`frontend/public/library-bg.jpg`
 
 ## Notes
 - CORS is open for local dev.
@@ -132,6 +153,9 @@ Volunteer flow:
 - Staff/Volunteer views require login. Set `STAFF_SIGNUP_CODE` to allow staff/volunteer registration.
 - Demo staff login button uses `DEMO_STAFF_EMAIL` and `DEMO_STAFF_PASSWORD`.
 - Google Books results are auto-imported into MongoDB when enabled, so picklists work for those books too.
+- MongoDB URI can be saved from Staff View → **MongoDB Setup**.
+- Inventory tools: CSV upload, search, and per-book quantity update.
+- Demo data: Staff View → **Seed demo requests**.
 
 ---
 ## Deployment Guide (Quick)

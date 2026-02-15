@@ -8,6 +8,7 @@ class ParseRequest(BaseModel):
     language: Optional[str] = None
     format: Optional[str] = None
     model: Optional[str] = None
+    use_gemini: Optional[bool] = True
 
 
 class ParsedPreferences(BaseModel):

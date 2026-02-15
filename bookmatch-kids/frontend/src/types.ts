@@ -78,6 +78,7 @@ export type ChatResponse = {
   matches: Book[];
   response?: string;
   gemini_used?: boolean;
+  gemini_error?: string | null;
 };
 
 export type GeminiModel = {
@@ -96,10 +97,18 @@ export type InventoryImportResult = {
   inserted_books: number;
   updated_books: number;
   inventory_upserts: number;
+  skipped?: number;
 };
 
 export type AnalyticsResponse = {
   status_counts: Record<string, number>;
   top_tags: { tag: string; count: number }[];
   daily: { date: string; count: number }[];
+};
+
+export type DbInfo = {
+  database: string;
+  books: number;
+  inventory: number;
+  requests: number;
 };
