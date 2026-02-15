@@ -15,6 +15,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- Health Check ---
+app.get('/api/health', (req, res) => {
+  const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+  const dbState = states[mongoose.connection.readyState] || 'unknown';
+  const geminiConfigured = Boolean(process.env.GOOGLE_API_KEY);
+  const geminiModel = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  res.json({
+    status: 'ok',
+    db: dbState,
+    geminiConfigured,
+    geminiModel
+  });
+});
+
 // --- Database Connection ---
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ Warehouse Connected: MongoDB Atlas'))
@@ -58,44 +72,130 @@ const Order = mongoose.model('Order', OrderSchema);
 // --- API ROUTES ---
 
 // 1. SEED DATABASE (Fetch 20 books from Google Books)
+const seedBooks = async () => {
+  const response = await axios.get(`https://www.googleapis.com/books/v1/volumes?q=subject:children&maxResults=20&key=${process.env.GOOGLE_BOOKS_API_KEY}`);
+  const books = response.data.items.map(item => ({
+    title: item.volumeInfo.title,
+    authors: item.volumeInfo.authors || ['Unknown'],
+    description: item.volumeInfo.description || 'A great book for kids!',
+    cover: item.volumeInfo.imageLinks?.thumbnail || 'https://via.placeholder.com/150',
+    category: item.volumeInfo.categories ? item.volumeInfo.categories[0] : 'General',
+    quantity: Math.floor(Math.random() * 10) + 1
+  }));
+  await Book.deleteMany({}); // Clears old data
+  await Book.insertMany(books);
+  return books.length;
+};
+
 app.post('/api/seed', async (req, res) => {
   try {
-    const response = await axios.get(`https://www.googleapis.com/books/v1/volumes?q=subject:children&maxResults=20&key=${process.env.GOOGLE_BOOKS_API_KEY}`);
-    const books = response.data.items.map(item => ({
-      title: item.volumeInfo.title,
-      authors: item.volumeInfo.authors || ['Unknown'],
-      description: item.volumeInfo.description || 'A great book for kids!',
-      cover: item.volumeInfo.imageLinks?.thumbnail || 'https://via.placeholder.com/150',
-      category: item.volumeInfo.categories ? item.volumeInfo.categories[0] : 'General',
-      quantity: Math.floor(Math.random() * 10) + 1
-    }));
-    await Book.deleteMany({}); // Clears old data
-    await Book.insertMany(books);
-    res.json({ message: "Success! 20 books added to warehouse." });
+    const count = await seedBooks();
+    res.json({ message: `Success! ${count} books added to warehouse.` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // 2. AI SEARCH (Gemini + MongoDB Regex)
+const STOP_WORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'about', 'with', 'without', 'for', 'to', 'from',
+  'of', 'in', 'on', 'at', 'by', 'is', 'are', 'was', 'were', 'be', 'being', 'been',
+  'i', 'we', 'you', 'they', 'he', 'she', 'it', 'my', 'your', 'their', 'our',
+  'want', 'like', 'love', 'story', 'book', 'read', 'reading', 'please'
+]);
+
+const toSafeRegex = (word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const fallbackKeywords = (query) => {
+  const tokens = (query || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean)
+    .filter((t) => t.length > 2 && !STOP_WORDS.has(t));
+
+  if (tokens.length >= 2) return [tokens[0], tokens[1]];
+  if (tokens.length === 1) return [tokens[0], tokens[0]];
+  return ['kids', 'story'];
+};
+
+let cachedModel = null;
+let cachedModelAt = 0;
+
+const resolveGeminiModel = async () => {
+  if (process.env.GEMINI_MODEL) return process.env.GEMINI_MODEL;
+  const now = Date.now();
+  if (cachedModel && now - cachedModelAt < 10 * 60 * 1000) return cachedModel;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`;
+  const resp = await axios.get(url);
+  const models = resp.data?.models || [];
+  const candidate = models.find((m) =>
+    Array.isArray(m.supportedGenerationMethods) &&
+    m.supportedGenerationMethods.includes('generateContent') &&
+    (m.name || '').includes('gemini')
+  );
+
+  const name = candidate?.name || 'models/gemini-1.5-flash-001';
+  cachedModel = name.startsWith('models/') ? name.slice('models/'.length) : name;
+  cachedModelAt = now;
+  return cachedModel;
+};
+
+const extractKeywords = async (query) => {
+  const modelName = await resolveGeminiModel();
+  const model = genAI.getGenerativeModel({ model: modelName });
+  const prompt = `Extract exactly 2 main keywords from this child's book request: "${query}". Return ONLY the words separated by a space.`;
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text().trim();
+  const words = raw.split(/\s+/).filter(Boolean).slice(0, 2);
+  if (words.length === 2) return words;
+  return fallbackKeywords(query);
+};
+
 app.post('/api/search', async (req, res) => {
   const { query } = req.body;
+  if (!query || typeof query !== 'string') {
+    return res.status(400).json({ error: 'Query is required.' });
+  }
+  if (!process.env.GOOGLE_API_KEY) {
+    return res.status(500).json({ error: 'Missing GOOGLE_API_KEY in server environment.' });
+  }
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const prompt = `Extract exactly 2 main keywords from this child's book request: "${query}". Return ONLY the words separated by a space.`;
-    const result = await model.generateContent(prompt);
-    const keywords = result.response.text().trim().split(' ');
+    const keywords = await extractKeywords(query);
+    const regex = keywords.map(toSafeRegex).join('|');
 
-    const books = await Book.find({
+    const total = await Book.countDocuments();
+    if (total === 0) {
+      await seedBooks();
+    }
+
+    let books = await Book.find({
       $or: [
-        { title: { $regex: keywords.join('|'), $options: 'i' } },
-        { description: { $regex: keywords.join('|'), $options: 'i' } }
+        { title: { $regex: regex, $options: 'i' } },
+        { description: { $regex: regex, $options: 'i' } }
       ]
     }).limit(6);
 
+    if (books.length === 0) {
+      books = await Book.find({}).limit(6);
+    }
+
     res.json(books);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const details = err?.response?.data || err?.message || err;
+    console.error('Gemini search error:', details);
+    const keywords = fallbackKeywords(query);
+    const regex = keywords.map(toSafeRegex).join('|');
+    let books = await Book.find({
+      $or: [
+        { title: { $regex: regex, $options: 'i' } },
+        { description: { $regex: regex, $options: 'i' } }
+      ]
+    }).limit(6);
+    if (books.length === 0) {
+      books = await Book.find({}).limit(6);
+    }
+    res.json(books);
   }
 });
 

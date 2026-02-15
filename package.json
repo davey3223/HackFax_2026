@@ -1,6 +1,17 @@
 {
+  "name": "hackfax-2026",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm --prefix ShelfSense/backend start\" \"npm --prefix ShelfSense/frontend run dev\"",
+    "dev:backend": "npm --prefix ShelfSense/backend start",
+    "dev:frontend": "npm --prefix ShelfSense/frontend run dev",
+    "install:all": "npm --prefix ShelfSense/backend install && npm --prefix ShelfSense/frontend install"
+  },
   "dependencies": {
     "axios": "^1.13.5",
     "lucide-react": "^0.564.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }
