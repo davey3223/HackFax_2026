@@ -1,8 +1,8 @@
 import os
 from pymongo import MongoClient
-from dotenv import load_dotenv
+from .config import load_env
 
-load_dotenv()
+load_env()
 
 
 def get_db():

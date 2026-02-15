@@ -7,6 +7,7 @@ class ParseRequest(BaseModel):
     age: Optional[int] = None
     language: Optional[str] = None
     format: Optional[str] = None
+    model: Optional[str] = None
 
 
 class ParsedPreferences(BaseModel):
@@ -27,6 +28,9 @@ class CreateRequest(BaseModel):
     parsed_preferences: Dict[str, Any]
     matched: List[BookMatch] = Field(default_factory=list)
     location_id: Optional[str] = None
+    requester_name: Optional[str] = None
+    requester_contact: Optional[str] = None
+    requester_notes: Optional[str] = None
 
 
 class UpdateStatus(BaseModel):
